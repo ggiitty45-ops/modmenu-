@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ModMenu</AssemblyName>
+    <RootNamespace>Game</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <!-- Default: API package from NuGet (the workflow fetches the official nuget.config). -->
+  <ItemGroup Condition="!Exists('$(MSBuildProjectDirectory)/libs/Survivalcraft.dll')">
+    <PackageReference Include="SurvivalcraftAPI.Survivalcraft" Version="1.9.*" />
+  </ItemGroup>
+
+  <!-- Fallback: if you put the 3 API dlls in a "libs" folder, they are used instead. -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)/libs/Survivalcraft.dll')">
+    <Reference Include="Engine">
+      <HintPath>libs/Engine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="EntitySystem">
+      <HintPath>libs/EntitySystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Survivalcraft">
+      <HintPath>libs/Survivalcraft.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

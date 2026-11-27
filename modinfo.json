@@ -1,0 +1,11 @@
+{
+  "Name": "Mod Menu",
+  "Version": "0.1.0",
+  "ApiVersion": "1.9",
+  "ScVersion": "2.4.0.0",
+  "PackageName": "com.user.modmenu",
+  "Description": "In-game mod menu. v0.1: spawn items from a searchable list.",
+  "Author": "You",
+  "GameplayImpactLevel": "Godmode",
+  "LoadOrder": 0
+}
