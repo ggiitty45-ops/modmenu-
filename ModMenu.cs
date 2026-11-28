@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Engine;
@@ -160,6 +162,7 @@ namespace Game
         public bool LockFood;
         public bool Fly;
         public double? LevelLock;
+        public readonly List<VarFrozen> Frozen = new List<VarFrozen>();
 
         public readonly ComponentPlayer Player;
         readonly BevelledButtonWidget m_button;
@@ -257,6 +260,20 @@ namespace Game
                 m_flyWasOn = Fly;
             }
 
+            for (int i = Frozen.Count - 1; i >= 0; i--)
+            {
+                VarFrozen frozen = Frozen[i];
+                try
+                {
+                    frozen.Member.Set(frozen.Owner, frozen.Value);
+                    frozen.Errors = 0;
+                }
+                catch (Exception)
+                {
+                    if (++frozen.Errors > 30) Frozen.RemoveAt(i);
+                }
+            }
+
             if (LevelLock.HasValue && TryGetLevelMember(out object target, out string member))
                 Rf.Set(target, member, LevelLock.Value);
         }
@@ -283,13 +300,14 @@ namespace Game
         }
 
         const int PageSize = 5;
-        const int TabCount = 4;
-        static readonly string[] TabNames = { "Items", "Level", "Immortal", "Fly" };
+        const int TabCount = 5;
+        static readonly string[] TabNames = { "Items", "Level", "Immortal", "Fly", "Editor" };
 
         static Dictionary<string, List<Entry>> s_byCategory;
         static List<string> s_categories;
 
         readonly ModMenuLauncher m_launcher;
+        readonly ModMenuEditor m_editor;
         readonly ComponentPlayer m_player;
 
         // common
@@ -386,7 +404,7 @@ namespace Game
             StackPanelWidget tabs = new StackPanelWidget { Direction = LayoutDirection.Horizontal };
             for (int i = 0; i < TabCount; i++)
             {
-                m_tabButtons[i] = new BevelledButtonWidget { Size = new Vector2(150f, 38f), Margin = new Vector2(3f, 2f) };
+                m_tabButtons[i] = new BevelledButtonWidget { Size = new Vector2(118f, 38f), Margin = new Vector2(3f, 2f) };
                 tabs.AddChildren(m_tabButtons[i]);
             }
             content.AddChildren(tabs);
@@ -485,6 +503,10 @@ namespace Game
             fly.AddChildren(new LabelWidget { Text = "Jump to go up. If nothing happens, tell the developer.", Color = dim, FontScale = 0.7f, Margin = new Vector2(4f, 8f) });
             m_panels[3] = fly;
 
+            // ---- tab 4: variable editor ----
+            m_editor = new ModMenuEditor(m_launcher);
+            m_panels[4] = m_editor.Root;
+
             for (int i = 0; i < TabCount; i++)
                 content.AddChildren(m_panels[i]);
 
@@ -556,6 +578,7 @@ namespace Game
             }
             if (tab == 0) RefreshPage();
             else if (tab == 1) RefreshLevel();
+            else if (tab == 4) { m_statusLabel.Text = ""; m_editor.Refresh(); }
             else m_statusLabel.Text = "";
         }
 
@@ -700,6 +723,7 @@ namespace Game
 
             if (m_tab == 0) UpdateItems();
             else if (m_tab == 1) UpdateLevel();
+            else if (m_tab == 4) m_editor.Update();
             else UpdateToggles();
         }
 
@@ -798,6 +822,628 @@ namespace Game
                     RefreshToggles();
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Variable editor: a reflection-based browser for the game's objects.
+    // ------------------------------------------------------------------
+    public class VarMember
+    {
+        public string Name;
+        public Type Type;
+        public Func<object, object> Get;
+        public Action<object, object> Set;
+
+        const BindingFlags Flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        const int MaxElements = 300;
+
+        public static List<VarMember> Build(object target)
+        {
+            List<VarMember> list = new List<VarMember>();
+            if (target == null || target is string) return list;
+
+            IEnumerable enumerable = target as IEnumerable;
+            if (enumerable != null)
+            {
+                IList ilist = target as IList;
+                List<object> snapshot = new List<object>();
+                try
+                {
+                    foreach (object element in enumerable)
+                    {
+                        snapshot.Add(element);
+                        if (snapshot.Count >= MaxElements) break;
+                    }
+                }
+                catch (Exception) { }
+
+                for (int i = 0; i < snapshot.Count; i++)
+                {
+                    int index = i;
+                    object item = snapshot[i];
+                    VarMember member = new VarMember();
+                    member.Name = "[" + index + "]" + (item == null ? "" : "  " + item.GetType().Name);
+                    member.Type = item == null ? typeof(object) : item.GetType();
+                    if (ilist != null)
+                    {
+                        member.Get = o => ilist[index];
+                        member.Set = (o, v) => ilist[index] = v;
+                    }
+                    else
+                    {
+                        member.Get = o => snapshot[index];
+                    }
+                    list.Add(member);
+                }
+                return list;
+            }
+
+            HashSet<string> seen = new HashSet<string>();
+            for (Type type = target.GetType(); type != null && type != typeof(object) && type != typeof(ValueType); type = type.BaseType)
+            {
+                foreach (FieldInfo field in type.GetFields(Flags))
+                {
+                    if (field.IsStatic || field.Name.IndexOf('<') >= 0) continue;
+                    if (!seen.Add("F:" + field.Name)) continue;
+                    FieldInfo f = field;
+                    VarMember member = new VarMember();
+                    member.Name = f.Name;
+                    member.Type = f.FieldType;
+                    member.Get = o => f.GetValue(o);
+                    member.Set = (o, v) => f.SetValue(o, v);
+                    list.Add(member);
+                }
+                foreach (PropertyInfo property in type.GetProperties(Flags))
+                {
+                    if (property.GetIndexParameters().Length != 0 || !property.CanRead) continue;
+                    if (!seen.Add("P:" + property.Name)) continue;
+                    PropertyInfo p = property;
+                    VarMember member = new VarMember();
+                    member.Name = p.Name;
+                    member.Type = p.PropertyType;
+                    member.Get = o => p.GetValue(o);
+                    if (p.CanWrite) member.Set = (o, v) => p.SetValue(o, v);
+                    list.Add(member);
+                }
+            }
+
+            list.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+            return list;
+        }
+    }
+
+    public class VarFrozen
+    {
+        public object Owner;
+        public VarMember Member;
+        public object Value;
+        public string Label;
+        public int Errors;
+    }
+
+    public class ModMenuEditor
+    {
+        const int PageSize = 5;
+        static readonly object Failed = new object();
+
+        enum View { Roots, Object, Frozen }
+
+        class Node
+        {
+            public string Title;
+            public object Target;
+            public List<VarMember> Members;
+            public Action<object> WriteBack;
+        }
+
+        class Row
+        {
+            public string Key;
+            public Func<string> Text;
+            public Func<string> Side;
+            public Action OnMain;
+            public Action OnSide;
+        }
+
+        public readonly StackPanelWidget Root;
+
+        readonly ModMenuLauncher m_launcher;
+        readonly ComponentPlayer m_player;
+        readonly LabelWidget m_pathLabel;
+        readonly LabelWidget m_pageLabel;
+        readonly BevelledButtonWidget m_back;
+        readonly BevelledButtonWidget m_home;
+        readonly BevelledButtonWidget m_search;
+        readonly BevelledButtonWidget m_frozenButton;
+        readonly BevelledButtonWidget m_prev;
+        readonly BevelledButtonWidget m_next;
+        readonly StackPanelWidget[] m_rowPanels = new StackPanelWidget[PageSize];
+        readonly BevelledButtonWidget[] m_main = new BevelledButtonWidget[PageSize];
+        readonly BevelledButtonWidget[] m_side = new BevelledButtonWidget[PageSize];
+
+        readonly List<Node> m_stack = new List<Node>();
+        readonly List<Row> m_all = new List<Row>();
+        readonly List<Row> m_shown = new List<Row>();
+        View m_view = View.Roots;
+        string m_filter = "";
+        int m_page;
+        int m_tick;
+
+        static Widget Spacer()
+        {
+            return new CanvasWidget { Size = new Vector2(float.PositiveInfinity, 0f) };
+        }
+
+        public ModMenuEditor(ModMenuLauncher launcher)
+        {
+            m_launcher = launcher;
+            m_player = launcher.Player;
+            Color dim = new Color(160, 170, 190);
+
+            Root = new StackPanelWidget { Direction = LayoutDirection.Vertical };
+
+            StackPanelWidget nav = new StackPanelWidget { Direction = LayoutDirection.Horizontal };
+            m_back = new BevelledButtonWidget { Text = "< Back", Size = new Vector2(110f, 38f), Margin = new Vector2(3f, 0f) };
+            m_home = new BevelledButtonWidget { Text = "Home", Size = new Vector2(100f, 38f), Margin = new Vector2(3f, 0f) };
+            m_search = new BevelledButtonWidget { Text = "Search", Size = new Vector2(110f, 38f), Margin = new Vector2(3f, 0f) };
+            m_frozenButton = new BevelledButtonWidget { Size = new Vector2(150f, 38f), Margin = new Vector2(3f, 0f) };
+            nav.AddChildren(m_back);
+            nav.AddChildren(m_home);
+            nav.AddChildren(m_search);
+            nav.AddChildren(Spacer());
+            nav.AddChildren(m_frozenButton);
+            Root.AddChildren(nav);
+
+            m_pathLabel = new LabelWidget { Color = dim, FontScale = 0.7f, Margin = new Vector2(4f, 4f) };
+            Root.AddChildren(m_pathLabel);
+
+            for (int i = 0; i < PageSize; i++)
+            {
+                m_main[i] = new BevelledButtonWidget { Size = new Vector2(450f, 38f), Margin = new Vector2(2f, 1f) };
+                m_side[i] = new BevelledButtonWidget { Size = new Vector2(120f, 38f), Margin = new Vector2(2f, 1f) };
+                m_rowPanels[i] = new StackPanelWidget { Direction = LayoutDirection.Horizontal };
+                m_rowPanels[i].AddChildren(m_main[i]);
+                m_rowPanels[i].AddChildren(m_side[i]);
+                Root.AddChildren(m_rowPanels[i]);
+            }
+
+            StackPanelWidget bottom = new StackPanelWidget { Direction = LayoutDirection.Horizontal };
+            m_prev = new BevelledButtonWidget { Text = "<", Size = new Vector2(56f, 38f), Margin = new Vector2(3f, 0f) };
+            m_next = new BevelledButtonWidget { Text = ">", Size = new Vector2(56f, 38f), Margin = new Vector2(3f, 0f) };
+            m_pageLabel = new LabelWidget { Color = dim, Margin = new Vector2(10f, 0f), VerticalAlignment = WidgetAlignment.Center };
+            bottom.AddChildren(m_prev);
+            bottom.AddChildren(m_next);
+            bottom.AddChildren(m_pageLabel);
+            Root.AddChildren(bottom);
+
+            Home();
+        }
+
+        // ------------------------------------------------------------ helpers
+        void Msg(string text)
+        {
+            m_player.ComponentGui.DisplaySmallMessage(text, Color.White, false, false);
+        }
+
+        static string Trunc(string text, int max)
+        {
+            if (text == null) return "";
+            return text.Length <= max ? text : text.Substring(0, max - 2) + "..";
+        }
+
+        static string Short(Exception e)
+        {
+            Exception inner = e.InnerException ?? e;
+            return Trunc(inner.Message, 60);
+        }
+
+        static string Fmt(object value)
+        {
+            if (value == Failed) return "<error>";
+            if (value == null) return "null";
+            Type type = value.GetType();
+            if (value is string text) return "\"" + Trunc(text, 40) + "\"";
+            if (type.IsPrimitive || type.IsEnum || value is decimal)
+                return System.Convert.ToString(value, CultureInfo.InvariantCulture);
+            if (value is IEnumerable)
+            {
+                ICollection collection = value as ICollection;
+                return collection != null ? type.Name + " (" + collection.Count + ")" : type.Name;
+            }
+            if (type.IsValueType)
+            {
+                try { return Trunc(value.ToString(), 40); } catch (Exception) { return type.Name; }
+            }
+            return "{" + type.Name + "}";
+        }
+
+        static bool IsEditable(Type type)
+        {
+            return type == typeof(bool) || type == typeof(string) || type.IsEnum
+                || type == typeof(byte) || type == typeof(sbyte) || type == typeof(short) || type == typeof(ushort)
+                || type == typeof(int) || type == typeof(uint) || type == typeof(long) || type == typeof(ulong)
+                || type == typeof(float) || type == typeof(double) || type == typeof(decimal);
+        }
+
+        static Type EffectiveType(VarMember member, object value)
+        {
+            Type type = member.Type;
+            if (value != null && (type == typeof(object) || type.IsInterface || type.IsAbstract))
+                type = value.GetType();
+            return Nullable.GetUnderlyingType(type) ?? type;
+        }
+
+        static object SafeGet(Node node, VarMember member)
+        {
+            try { return member.Get(node.Target); }
+            catch (Exception) { return Failed; }
+        }
+
+        static bool TryParse(Type type, string text, out object result)
+        {
+            result = null;
+            if (type == typeof(string)) { result = text ?? ""; return true; }
+            try
+            {
+                result = System.Convert.ChangeType((text ?? "").Trim(), type, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        string PathText()
+        {
+            List<string> titles = new List<string>();
+            foreach (Node node in m_stack) titles.Add(node.Title);
+            return string.Join(" > ", titles);
+        }
+
+        // ------------------------------------------------------------ navigation
+        static Node MakeNode(string title, object target, Action<object> writeBack)
+        {
+            return new Node { Title = title, Target = target, WriteBack = writeBack, Members = VarMember.Build(target) };
+        }
+
+        void Home()
+        {
+            m_stack.Clear();
+            m_view = View.Roots;
+            m_filter = "";
+            Rebuild();
+        }
+
+        void Push(Node node)
+        {
+            m_stack.Add(node);
+            m_view = View.Object;
+            m_filter = "";
+            Rebuild();
+        }
+
+        void Back()
+        {
+            if (m_view != View.Frozen && m_stack.Count > 0)
+                m_stack.RemoveAt(m_stack.Count - 1);
+            m_view = m_stack.Count > 0 ? View.Object : View.Roots;
+            m_filter = "";
+            Rebuild();
+        }
+
+        void ShowFrozen()
+        {
+            m_view = View.Frozen;
+            m_filter = "";
+            Rebuild();
+        }
+
+        public void Refresh()
+        {
+            RefreshRows();
+        }
+
+        // ------------------------------------------------------------ rows
+        void Rebuild()
+        {
+            m_all.Clear();
+            if (m_view == View.Roots) BuildRoots();
+            else if (m_view == View.Object) BuildObject(m_stack[m_stack.Count - 1]);
+            else BuildFrozen();
+            ApplyFilter();
+        }
+
+        void AddRoot(string title, object target)
+        {
+            if (target == null) return;
+            m_all.Add(new Row
+            {
+                Key = title.ToLowerInvariant(),
+                Text = () => title + "   >",
+                Side = () => "",
+                OnMain = () => Push(MakeNode(title, target, null))
+            });
+        }
+
+        void BuildRoots()
+        {
+            AddRoot("Player", m_player);
+            AddRoot("Entity", m_player.Entity);
+
+            List<object> components = new List<object>();
+            foreach (Component component in m_player.Entity.Components) components.Add(component);
+            AddRoot("Components (" + components.Count + ")", components);
+
+            AddRoot("PlayerData", Rf.Get(m_player, "PlayerData"));
+            AddRoot("PlayerStats", Rf.Get(m_player, "PlayerStats"));
+            AddRoot("Subsystems", Rf.Get(m_player.Project, "Subsystems"));
+        }
+
+        void BuildObject(Node node)
+        {
+            foreach (VarMember member in node.Members)
+            {
+                VarMember m = member;
+                m_all.Add(new Row
+                {
+                    Key = m.Name.ToLowerInvariant(),
+                    Text = () => m.Name + " = " + Fmt(SafeGet(node, m)),
+                    Side = () => CanFreeze(node, m) ? (FindFrozen(node.Target, m) != null ? "[Frozen]" : "Freeze") : "",
+                    OnMain = () => Activate(node, m),
+                    OnSide = () => ToggleFreeze(node, m)
+                });
+            }
+        }
+
+        void BuildFrozen()
+        {
+            foreach (VarFrozen entry in m_launcher.Frozen)
+            {
+                VarFrozen f = entry;
+                m_all.Add(new Row
+                {
+                    Key = f.Label.ToLowerInvariant(),
+                    Text = () => f.Label + " = " + Fmt(f.Value),
+                    Side = () => "Remove",
+                    OnMain = () => EditFrozen(f),
+                    OnSide = () =>
+                    {
+                        m_launcher.Frozen.Remove(f);
+                        Rebuild();
+                    }
+                });
+            }
+        }
+
+        void ApplyFilter()
+        {
+            m_shown.Clear();
+            foreach (Row row in m_all)
+            {
+                if (m_filter.Length == 0 || row.Key.Contains(m_filter))
+                    m_shown.Add(row);
+            }
+            m_page = 0;
+            RefreshRows();
+        }
+
+        int PageCount()
+        {
+            return Math.Max(1, (m_shown.Count + PageSize - 1) / PageSize);
+        }
+
+        Row RowAt(int slot)
+        {
+            int index = m_page * PageSize + slot;
+            return index < m_shown.Count ? m_shown[index] : null;
+        }
+
+        void RefreshRows()
+        {
+            if (m_page >= PageCount()) m_page = PageCount() - 1;
+
+            for (int i = 0; i < PageSize; i++)
+            {
+                Row row = RowAt(i);
+                if (row == null)
+                {
+                    m_rowPanels[i].IsVisible = false;
+                    continue;
+                }
+                m_rowPanels[i].IsVisible = true;
+
+                string text;
+                string side;
+                try { text = row.Text(); side = row.Side(); }
+                catch (Exception) { text = "<error>"; side = ""; }
+
+                m_main[i].Text = Trunc(text, 60);
+                m_side[i].IsVisible = side.Length > 0;
+                m_side[i].Text = side;
+            }
+
+            m_pageLabel.Text = "Page " + (m_page + 1) + "/" + PageCount() + "   (" + m_shown.Count + " rows)"
+                + (m_filter.Length == 0 ? "" : "   filter: " + m_filter);
+            m_frozenButton.Text = "Frozen (" + m_launcher.Frozen.Count + ")";
+
+            if (m_view == View.Roots) m_pathLabel.Text = "Home - pick something to inspect";
+            else if (m_view == View.Frozen) m_pathLabel.Text = "Frozen values - tap a row to change its value";
+            else m_pathLabel.Text = Trunc(PathText(), 90);
+        }
+
+        // ------------------------------------------------------------ editing
+        void EditValue(Type type, object current, Action<object> commit)
+        {
+            if (type == typeof(bool))
+            {
+                commit(!(current is bool b && b));
+                return;
+            }
+
+            if (type.IsEnum)
+            {
+                Array values = Enum.GetValues(type);
+                if (values.Length == 0) return;
+                int index = Array.IndexOf(values, current);
+                commit(values.GetValue((index + 1) % values.Length));
+                return;
+            }
+
+            string initial = current == null ? "" : System.Convert.ToString(current, CultureInfo.InvariantCulture);
+            DialogsManager.ShowDialog(m_player.GuiWidget, new TextBoxDialog("Edit value (" + type.Name + ")", initial, 40, text =>
+            {
+                if (TryParse(type, text, out object result)) commit(result);
+                else Msg("Invalid " + type.Name);
+            }));
+        }
+
+        void Activate(Node node, VarMember member)
+        {
+            object value = SafeGet(node, member);
+            if (value == Failed)
+            {
+                Msg("Cannot read this value");
+                return;
+            }
+
+            Type type = EffectiveType(member, value);
+            if (IsEditable(type))
+            {
+                if (member.Set == null)
+                {
+                    Msg("Read-only value");
+                    return;
+                }
+                EditValue(type, value, newValue =>
+                {
+                    try
+                    {
+                        member.Set(node.Target, newValue);
+                        if (node.WriteBack != null) node.WriteBack(node.Target);
+                    }
+                    catch (Exception e)
+                    {
+                        Msg("Failed: " + Short(e));
+                    }
+                    RefreshRows();
+                });
+                return;
+            }
+
+            if (value == null)
+            {
+                Msg("null");
+                return;
+            }
+
+            Action<object> writeBack = null;
+            if (value.GetType().IsValueType && member.Set != null)
+            {
+                writeBack = newValue =>
+                {
+                    member.Set(node.Target, newValue);
+                    if (node.WriteBack != null) node.WriteBack(node.Target);
+                };
+            }
+            Push(MakeNode(member.Name, value, writeBack));
+        }
+
+        // ------------------------------------------------------------ freeze
+        bool CanFreeze(Node node, VarMember member)
+        {
+            if (node.WriteBack != null || member.Set == null) return false;
+            object value = SafeGet(node, member);
+            return value != Failed && IsEditable(EffectiveType(member, value));
+        }
+
+        VarFrozen FindFrozen(object owner, VarMember member)
+        {
+            foreach (VarFrozen f in m_launcher.Frozen)
+            {
+                if (ReferenceEquals(f.Owner, owner) && f.Member.Name == member.Name) return f;
+            }
+            return null;
+        }
+
+        void ToggleFreeze(Node node, VarMember member)
+        {
+            VarFrozen existing = FindFrozen(node.Target, member);
+            if (existing != null)
+            {
+                m_launcher.Frozen.Remove(existing);
+                Msg("Unfrozen: " + member.Name);
+            }
+            else
+            {
+                object value = SafeGet(node, member);
+                if (value == Failed) return;
+                m_launcher.Frozen.Add(new VarFrozen
+                {
+                    Owner = node.Target,
+                    Member = member,
+                    Value = value,
+                    Label = PathText() + "." + member.Name
+                });
+                Msg("Frozen at " + Fmt(value));
+            }
+            RefreshRows();
+        }
+
+        void EditFrozen(VarFrozen frozen)
+        {
+            Type type = EffectiveType(frozen.Member, frozen.Value);
+            if (!IsEditable(type)) return;
+            EditValue(type, frozen.Value, newValue =>
+            {
+                frozen.Value = newValue;
+                RefreshRows();
+            });
+        }
+
+        // ------------------------------------------------------------ update
+        public void Update()
+        {
+            if (m_back.IsClicked) { Back(); return; }
+            if (m_home.IsClicked) { Home(); return; }
+            if (m_frozenButton.IsClicked) { ShowFrozen(); return; }
+
+            if (m_search.IsClicked)
+            {
+                DialogsManager.ShowDialog(m_player.GuiWidget, new TextBoxDialog("Filter by name", m_filter, 30, text =>
+                {
+                    m_filter = (text ?? "").Trim().ToLowerInvariant();
+                    ApplyFilter();
+                }));
+            }
+
+            if (m_prev.IsClicked && m_page > 0)
+            {
+                m_page--;
+                RefreshRows();
+            }
+            if (m_next.IsClicked && m_page < PageCount() - 1)
+            {
+                m_page++;
+                RefreshRows();
+            }
+
+            for (int i = 0; i < PageSize; i++)
+            {
+                if (m_main[i].IsClicked)
+                {
+                    Row row = RowAt(i);
+                    if (row != null && row.OnMain != null) row.OnMain();
+                    return;
+                }
+                if (m_side[i].IsClicked)
+                {
+                    Row row = RowAt(i);
+                    if (row != null && row.OnSide != null) row.OnSide();
+                    return;
+                }
+            }
+
+            // live values: refresh the visible rows a few times per second
+            if (++m_tick % 20 == 0) RefreshRows();
         }
     }
 }
