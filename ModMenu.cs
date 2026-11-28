@@ -1,20 +1,21 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Engine;
-using GameEntitySystem;
-using TemplatesDatabase;
+using HarmonyLib;
 
 namespace Game
 {
     // ------------------------------------------------------------------
-    // Loader: only writes a line to the game log so you can confirm that
-    // the mod was loaded (Settings > Compatibility > View Game Log).
+    // Loader: registers the Harmony patch below and writes a line to the
+    // game log so you can confirm the mod was loaded.
     // ------------------------------------------------------------------
     public class ModMenuLoader : ModLoader
     {
         public override void __ModInitialize()
         {
             ModsManager.RegisterHook("OnLoadingFinished", this, 1);
+            new Harmony("com.user.modmenu").PatchAll(typeof(ModMenuLoader).Assembly);
         }
 
         public override void OnLoadingFinished(List<Action> actions)
@@ -24,45 +25,54 @@ namespace Game
     }
 
     // ------------------------------------------------------------------
-    // Component attached to the Player entity (see Assets/ModMenu.xdb).
-    // Adds a small "MOD" button to the player's HUD that opens the menu.
+    // After every ComponentPlayer.Update, make sure that player has the
+    // "MOD" launcher button on its HUD (added once per player).
+    // No .xdb database entry is needed.
     // ------------------------------------------------------------------
-    public class ComponentModMenu : Component, IUpdateable
+    [HarmonyPatch(typeof(ComponentPlayer), nameof(ComponentPlayer.Update))]
+    public static class ModMenuPlayerPatch
     {
-        ComponentPlayer m_player;
-        BevelledButtonWidget m_launcher;
+        static readonly ConditionalWeakTable<ComponentPlayer, ModMenuLauncher> s_launchers =
+            new ConditionalWeakTable<ComponentPlayer, ModMenuLauncher>();
 
-        public UpdateOrder UpdateOrder => UpdateOrder.Default;
-
-        public override void Load(ValuesDictionary valuesDictionary, IdToEntityMap idToEntityMap)
+        [HarmonyPostfix]
+        public static void Postfix(ComponentPlayer __instance)
         {
-            base.Load(valuesDictionary, idToEntityMap);
-            m_player = Entity.FindComponent<ComponentPlayer>(true);
+            if (__instance == null) return;
+            if (s_launchers.TryGetValue(__instance, out ModMenuLauncher _)) return;
+
+            ContainerWidget gui = __instance.GuiWidget;
+            if (gui == null) return;
+
+            ModMenuLauncher launcher = new ModMenuLauncher(__instance);
+            gui.AddChildren(launcher);
+            s_launchers.Add(__instance, launcher);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The small "MOD" button on the left edge of the screen.
+    // ------------------------------------------------------------------
+    public class ModMenuLauncher : CanvasWidget
+    {
+        readonly ComponentPlayer m_player;
+        readonly BevelledButtonWidget m_button;
+
+        public ModMenuLauncher(ComponentPlayer player)
+        {
+            m_player = player;
+            Size = new Vector2(76f, 46f);
+            HorizontalAlignment = WidgetAlignment.Near;
+            VerticalAlignment = WidgetAlignment.Center;
+            Margin = new Vector2(6f, 0f);
+
+            m_button = new BevelledButtonWidget { Text = "MOD", Size = new Vector2(76f, 46f) };
+            AddChildren(m_button);
         }
 
-        public void Update(float dt)
+        public override void Update()
         {
-            if (m_player == null) return;
-
-            // The HUD is built by other components, so attach on the first
-            // frame where it exists instead of inside Load().
-            if (m_launcher == null)
-            {
-                ContainerWidget gui = m_player.GuiWidget;
-                if (gui == null) return;
-
-                m_launcher = new BevelledButtonWidget
-                {
-                    Text = "MOD",
-                    Size = new Vector2(76f, 46f),
-                    HorizontalAlignment = WidgetAlignment.Near,
-                    VerticalAlignment = WidgetAlignment.Center,
-                    Margin = new Vector2(6f, 0f)
-                };
-                gui.AddChildren(m_launcher);
-            }
-
-            if (m_launcher.IsClicked)
+            if (m_button.IsClicked)
             {
                 DialogsManager.ShowDialog(m_player.GuiWidget, new ModMenuDialog(m_player));
             }
