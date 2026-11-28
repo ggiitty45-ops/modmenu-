@@ -1,0 +1,66 @@
+name: Build ModMenu
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Fetch official NuGet.Config
+        run: |
+          ok=0
+          for url in \
+            "https://gitee.com/SC-SPM/SurvivalcraftApi/raw/SCAPI1.9/Nuget.Config" \
+            "https://gitee.com/SC-SPM/SurvivalcraftApi/raw/SCAPI1.9/nuget.config" \
+            "https://gitee.com/SC-SPM/SurvivalcraftApi/raw/SCAPI1.9/NuGet.Config" \
+            "https://raw.githubusercontent.com/cpw1299/SurvivalcraftApi/master/Nuget.Config" \
+            "https://raw.githubusercontent.com/cpw1299/SurvivalcraftApi/main/Nuget.Config"
+          do
+            if curl -fsSL "$url" -o nuget.config.tmp && grep -qi "<configuration" nuget.config.tmp; then
+              mv nuget.config.tmp nuget.config
+              echo "Using NuGet.Config from $url"
+              ok=1
+              break
+            fi
+          done
+          rm -f nuget.config.tmp
+          if [ "$ok" = "0" ]; then
+            echo "::warning::Could not download the official NuGet.Config, using the default nuget.org source"
+          fi
+
+      - name: Build
+        run: dotnet build ModMenu.csproj -c Release -o out
+
+      - name: Package .scmod
+        run: |
+          mkdir -p pkg/Assets
+          cp modinfo.json pkg/
+          cp out/ModMenu.dll pkg/
+          cp ModMenu.xdb pkg/Assets/ 2>/dev/null || cp Assets/ModMenu.xdb pkg/Assets/
+          cd pkg
+          zip -r ../ModMenu.scmod .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ModMenu-scmod
+          path: ModMenu.scmod
+
+      - name: Publish release (direct download link)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest ModMenu.scmod --title "Latest build" --notes "Build ${{ github.sha }}" --target ${{ github.sha }}

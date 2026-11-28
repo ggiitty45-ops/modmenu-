@@ -1,0 +1,7 @@
+<Mod>
+    <EntityTemplate Name="Player" Guid="4be6c1c5-d65d-4537-8a8b-a391969e6dc2">
+        <MemberComponentTemplate Name="ModMenu" Guid="3854a95f-b290-44b8-9085-838f1d10572f">
+            <Parameter Name="Class" Guid="6382924c-918e-4845-8af1-fff3a7b14dfc" Value="Game.ComponentModMenu" Type="string"/>
+        </MemberComponentTemplate>
+    </EntityTemplate>
+</Mod>
