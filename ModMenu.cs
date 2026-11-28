@@ -70,9 +70,8 @@ namespace Game
     }
 
     // ------------------------------------------------------------------
-    // The menu window. Tab 1 (for now): spawn items.
-    // To add more features later, add buttons in the header/footer and
-    // handle them in Update().
+    // The menu window. Page 1 (for now): spawn items.
+    // Uses only basic widgets (Canvas, StackPanel, Label, Button, BlockIcon).
     // ------------------------------------------------------------------
     public class ModMenuDialog : Dialog
     {
@@ -83,36 +82,47 @@ namespace Game
             public string Lower;
         }
 
+        const int PageSize = 5;
         static List<Entry> s_entries;
 
         readonly ComponentPlayer m_player;
-        readonly ListPanelWidget m_list;
+        readonly List<Entry> m_filtered = new List<Entry>();
+        readonly StackPanelWidget[] m_rows = new StackPanelWidget[PageSize];
+        readonly BlockIconWidget[] m_icons = new BlockIconWidget[PageSize];
+        readonly BevelledButtonWidget[] m_rowButtons = new BevelledButtonWidget[PageSize];
+        readonly BevelledButtonWidget[] m_amountButtons;
+        readonly int[] m_amounts = { 1, 10, 40 };
         readonly LabelWidget m_selectedLabel;
-        readonly LabelWidget m_countLabel;
+        readonly LabelWidget m_statusLabel;
+        readonly LabelWidget m_pageLabel;
         readonly BevelledButtonWidget m_searchButton;
         readonly BevelledButtonWidget m_closeButton;
         readonly BevelledButtonWidget m_giveButton;
-        readonly BevelledButtonWidget[] m_amountButtons;
-        readonly int[] m_amounts = { 1, 10, 40 };
+        readonly BevelledButtonWidget m_prevButton;
+        readonly BevelledButtonWidget m_nextButton;
 
         int m_amountIndex = 1;
+        int m_page;
         string m_filter = "";
         Entry m_selected;
+
+        static Widget Spacer()
+        {
+            return new CanvasWidget { Size = new Vector2(float.PositiveInfinity, 0f) };
+        }
 
         public ModMenuDialog(ComponentPlayer player)
         {
             m_player = player;
             EnsureEntries();
 
-            // ---- palette (dark, flat, blue accent) ----
             Color accent = new Color(86, 156, 255);
             Color panelFill = new Color(14, 18, 30, 242);
             Color dim = new Color(160, 170, 190);
 
-            // ---- panel ----
             CanvasWidget panel = new CanvasWidget
             {
-                Size = new Vector2(660f, 420f),
+                Size = new Vector2(640f, 400f),
                 HorizontalAlignment = WidgetAlignment.Center,
                 VerticalAlignment = WidgetAlignment.Center
             };
@@ -121,82 +131,80 @@ namespace Game
             StackPanelWidget content = new StackPanelWidget
             {
                 Direction = LayoutDirection.Vertical,
-                Size = new Vector2(float.PositiveInfinity, float.PositiveInfinity),
-                Margin = new Vector2(16f, 12f)
+                Margin = new Vector2(14f, 10f)
             };
 
-            // ---- header: title + search + close ----
-            StackPanelWidget header = new StackPanelWidget
-            {
-                Direction = LayoutDirection.Horizontal,
-                Size = new Vector2(float.PositiveInfinity, 50f)
-            };
+            // ---- header ----
+            StackPanelWidget header = new StackPanelWidget { Direction = LayoutDirection.Horizontal };
             header.AddChildren(new LabelWidget
             {
-                Text = "MOD MENU  -  Spawn Items",
+                Text = "MOD MENU - Spawn Items",
                 Color = accent,
                 VerticalAlignment = WidgetAlignment.Center
             });
-            header.AddChildren(new UniformSpacerWidget());
-            m_searchButton = new BevelledButtonWidget { Text = "Search", Size = new Vector2(110f, 44f), Margin = new Vector2(4f, 0f) };
-            m_closeButton = new BevelledButtonWidget { Text = "Close", Size = new Vector2(100f, 44f), Margin = new Vector2(4f, 0f) };
+            header.AddChildren(Spacer());
+            m_searchButton = new BevelledButtonWidget { Text = "Search", Size = new Vector2(110f, 40f), Margin = new Vector2(3f, 0f) };
+            m_closeButton = new BevelledButtonWidget { Text = "Close", Size = new Vector2(100f, 40f), Margin = new Vector2(3f, 0f) };
             header.AddChildren(m_searchButton);
             header.AddChildren(m_closeButton);
             content.AddChildren(header);
 
-            // ---- item list ----
-            m_list = new ListPanelWidget
+            // ---- item rows (paged) ----
+            for (int i = 0; i < PageSize; i++)
             {
-                Direction = LayoutDirection.Vertical,
-                ItemSize = 52f,
-                Size = new Vector2(float.PositiveInfinity, 250f)
-            };
-            m_list.ItemWidgetFactory = BuildRow;
-            m_list.ItemClicked += item => Select(item as Entry);
-            content.AddChildren(m_list);
+                m_icons[i] = new BlockIconWidget
+                {
+                    Size = new Vector2(36f, 36f),
+                    VerticalAlignment = WidgetAlignment.Center,
+                    Margin = new Vector2(4f, 0f)
+                };
+                m_rowButtons[i] = new BevelledButtonWidget { Size = new Vector2(540f, 40f), Margin = new Vector2(2f, 2f) };
+                m_rows[i] = new StackPanelWidget { Direction = LayoutDirection.Horizontal };
+                m_rows[i].AddChildren(m_icons[i]);
+                m_rows[i].AddChildren(m_rowButtons[i]);
+                content.AddChildren(m_rows[i]);
+            }
 
-            // ---- footer: selected item, amount, give ----
-            StackPanelWidget footer = new StackPanelWidget
-            {
-                Direction = LayoutDirection.Horizontal,
-                Size = new Vector2(float.PositiveInfinity, 54f)
-            };
+            // ---- pager ----
+            StackPanelWidget pager = new StackPanelWidget { Direction = LayoutDirection.Horizontal };
+            m_prevButton = new BevelledButtonWidget { Text = "<", Size = new Vector2(70f, 38f), Margin = new Vector2(3f, 0f) };
+            m_nextButton = new BevelledButtonWidget { Text = ">", Size = new Vector2(70f, 38f), Margin = new Vector2(3f, 0f) };
+            m_pageLabel = new LabelWidget { Color = dim, VerticalAlignment = WidgetAlignment.Center, Margin = new Vector2(10f, 0f) };
+            pager.AddChildren(m_prevButton);
+            pager.AddChildren(m_nextButton);
+            pager.AddChildren(m_pageLabel);
+            content.AddChildren(pager);
+
+            // ---- footer ----
+            StackPanelWidget footer = new StackPanelWidget { Direction = LayoutDirection.Horizontal };
             m_selectedLabel = new LabelWidget
             {
-                Text = "Tap an item in the list",
+                Text = "Tap an item",
                 Color = dim,
                 VerticalAlignment = WidgetAlignment.Center
             };
             footer.AddChildren(m_selectedLabel);
-            footer.AddChildren(new UniformSpacerWidget());
-
+            footer.AddChildren(Spacer());
             m_amountButtons = new BevelledButtonWidget[m_amounts.Length];
             for (int i = 0; i < m_amounts.Length; i++)
             {
-                m_amountButtons[i] = new BevelledButtonWidget { Size = new Vector2(72f, 44f), Margin = new Vector2(3f, 0f) };
+                m_amountButtons[i] = new BevelledButtonWidget { Size = new Vector2(70f, 40f), Margin = new Vector2(3f, 0f) };
                 footer.AddChildren(m_amountButtons[i]);
             }
-            m_giveButton = new BevelledButtonWidget { Text = "GIVE", Size = new Vector2(100f, 44f), Margin = new Vector2(8f, 0f) };
+            m_giveButton = new BevelledButtonWidget { Text = "GIVE", Size = new Vector2(96f, 40f), Margin = new Vector2(6f, 0f) };
             footer.AddChildren(m_giveButton);
             content.AddChildren(footer);
 
-            // ---- status line ----
-            m_countLabel = new LabelWidget
-            {
-                Color = dim,
-                FontScale = 0.7f,
-                HorizontalAlignment = WidgetAlignment.Near
-            };
-            content.AddChildren(m_countLabel);
+            m_statusLabel = new LabelWidget { Color = dim, FontScale = 0.7f };
+            content.AddChildren(m_statusLabel);
 
             panel.AddChildren(content);
             AddChildren(panel);
 
             RefreshAmountButtons();
-            Refill();
+            ApplyFilter();
         }
 
-        // Build the list of spawnable items once per game session.
         void EnsureEntries()
         {
             if (s_entries != null) return;
@@ -224,52 +232,43 @@ namespace Game
             s_entries = list;
         }
 
-        Widget BuildRow(object item)
+        int PageCount()
         {
-            Entry entry = (Entry)item;
-            StackPanelWidget row = new StackPanelWidget
-            {
-                Direction = LayoutDirection.Horizontal,
-                Size = new Vector2(float.PositiveInfinity, 52f)
-            };
-            row.AddChildren(new BlockIconWidget
-            {
-                Value = entry.Value,
-                Size = new Vector2(40f, 40f),
-                VerticalAlignment = WidgetAlignment.Center,
-                Margin = new Vector2(8f, 0f)
-            });
-            row.AddChildren(new LabelWidget
-            {
-                Text = entry.Name,
-                VerticalAlignment = WidgetAlignment.Center,
-                Margin = new Vector2(10f, 0f)
-            });
-            return row;
+            return Math.Max(1, (m_filtered.Count + PageSize - 1) / PageSize);
         }
 
-        void Refill()
+        void ApplyFilter()
         {
-            m_list.ClearItems();
-            int shown = 0;
+            m_filtered.Clear();
             foreach (Entry entry in s_entries)
             {
                 if (m_filter.Length == 0 || entry.Lower.Contains(m_filter))
-                {
-                    m_list.AddItem(entry);
-                    shown++;
-                }
+                    m_filtered.Add(entry);
             }
-            string filterText = m_filter.Length == 0 ? "" : "  |  filter: " + m_filter;
-            m_countLabel.Text = shown + " items" + filterText;
+            m_page = 0;
+            RefreshPage();
         }
 
-        void Select(Entry entry)
+        void RefreshPage()
         {
-            if (entry == null) return;
-            m_selected = entry;
-            m_selectedLabel.Text = entry.Name;
-            m_selectedLabel.Color = Color.White;
+            for (int i = 0; i < PageSize; i++)
+            {
+                int index = m_page * PageSize + i;
+                if (index < m_filtered.Count)
+                {
+                    Entry entry = m_filtered[index];
+                    m_rows[i].IsVisible = true;
+                    m_icons[i].Value = entry.Value;
+                    m_rowButtons[i].Text = (entry == m_selected ? "> " : "") + entry.Name;
+                }
+                else
+                {
+                    m_rows[i].IsVisible = false;
+                }
+            }
+            m_pageLabel.Text = "Page " + (m_page + 1) + " / " + PageCount();
+            string filterText = m_filter.Length == 0 ? "" : "  |  filter: " + m_filter;
+            m_statusLabel.Text = m_filtered.Count + " items" + filterText;
         }
 
         void RefreshAmountButtons()
@@ -308,8 +307,34 @@ namespace Game
                 DialogsManager.ShowDialog(m_player.GuiWidget, new TextBoxDialog("Search item", m_filter, 30, text =>
                 {
                     m_filter = (text ?? "").Trim().ToLowerInvariant();
-                    Refill();
+                    ApplyFilter();
                 }));
+            }
+
+            if (m_prevButton.IsClicked && m_page > 0)
+            {
+                m_page--;
+                RefreshPage();
+            }
+            if (m_nextButton.IsClicked && m_page < PageCount() - 1)
+            {
+                m_page++;
+                RefreshPage();
+            }
+
+            for (int i = 0; i < PageSize; i++)
+            {
+                if (m_rowButtons[i].IsClicked)
+                {
+                    int index = m_page * PageSize + i;
+                    if (index < m_filtered.Count)
+                    {
+                        m_selected = m_filtered[index];
+                        m_selectedLabel.Text = m_selected.Name;
+                        m_selectedLabel.Color = Color.White;
+                        RefreshPage();
+                    }
+                }
             }
 
             for (int i = 0; i < m_amountButtons.Length; i++)
@@ -322,9 +347,7 @@ namespace Game
             }
 
             if (m_giveButton.IsClicked)
-            {
                 Give();
-            }
         }
     }
 }
